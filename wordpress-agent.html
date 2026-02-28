@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Caladrius Copilot</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- React & Libraries -->
+    <script type="importmap">
+    {
+      "imports": {
+        "@google/genai": "https://esm.sh/@google/genai@0.2.1",
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.300.0"
+      }
+    }
+    </script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+      body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; }
+      ::-webkit-scrollbar { width: 8px; }
+      ::-webkit-scrollbar-track { background: #1e293b; }
+      ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+      .animate-pulse-slow { animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+      .fade-in { animation: fadeIn 0.3s ease-in-out; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module" data-presets="typescript,react">
+      import React, { useState, useEffect, useRef } from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { GoogleGenAI, Modality } from '@google/genai';
+      import { 
+        Mic, MicOff, Activity, Cpu, MessageSquare, Globe2, 
+        FileText, Stethoscope, ShieldCheck, Radio, AlertCircle, Settings, X, Key
+      } from 'lucide-react';
+
+      const AGENT_NAME = "Caladrius";
+
+      // ==========================================
+      // KNOWLEDGE BASE (RCM / Medical)
+      // ==========================================
+      const CALADRIUS_SYSTEM_INSTRUCTION_BASE = `
+# Personality
+You are ${AGENT_NAME}, an expert Revenue Cycle Management (RCM) Copilot designed to assist medical coders and billing specialists.
+- **Tone**: Professional, precise, clinical yet helpful, and compliance-focused.
+- **Role**: You act as a senior coding auditor and compliance guide.
+- **Objective**: Ensure accurate coding, prevent claim denials, and streamline documentation processing.
+
+# Core Competencies (RCM Knowledge Base)
+
+## 1. Medical Coding Guidelines
+- **ICD-10-CM**: Expert in diagnosis coding guidelines. specific focus on combination codes (e.g., Diabetes with CKD), laterality, and sequela.
+- **CPT (Current Procedural Terminology)**: Evaluation & Management (E/M) levels, surgical modifiers (e.g., 25, 59, 91), and bundling edits (NCCI).
+- **HCPCS Level II**: DME, ambulance services, and drug codes (J-codes).
+
+## 2. Documentation Improvement (CDI)
+- Analyze clinical notes for "Medical Necessity".
+- Identify missing specificity (e.g., "Heart Failure" vs. "Acute on Chronic Systolic Heart Failure").
+- Prompt for query opportunities when documentation is ambiguous.
+
+## 3. Payer Rules & Compliance
+- **Medicare (CMS)**: Local Coverage Determinations (LCD) and National Coverage Determinations (NCD).
+- **Commercial Payers**: Prior authorization requirements and specific payer policies (Aetna, UHC, BCBS).
+- **HIPAA**: Strict adherence to patient privacy. Never ask for or store PII/PHI in this chat.
+
+# Conversational Scenarios
+
+## Scenario: Coder asks about E/M Levelling
+**User**: "I have a consult note, high complexity MDM, but only 15 mins spent."
+**Caladrius**: "For outpatient consults (if payer accepts) or office visits, medical decision making (MDM) or time can be used. However, high complexity MDM usually maps to 99205/99215. 15 minutes is insufficient for that level based on time. We should prioritize the MDM driver here. Verify if the payer accepts consult codes (99242-99245) or requires new patient codes (99202-99205)."
+
+## Scenario: Denial Management
+**User**: "Claim denied for CPT 36415 as inclusive."
+**Caladrius**: "CPT 36415 (Venipuncture) is often bundled into E/M visits or other procedures under NCCI edits. Check if a modifier 25 was attached to the E/M code if a significant, separately identifiable service was performed, or if it was billed with a lab panel where the draw is bundled."
+
+## Scenario: Specificity Check
+**User**: "Doctor wrote 'Pneumonia'."
+**Caladrius**: "That is unspecified (J18.9). To prevent medical necessity denials, check the chart for the organism (e.g., Strep, Viral) or severity. If the patient has COPD or Aspiration risk, those specific codes carry higher risk adjustment (HCC) weight."
+
+# Protocols
+- **Confidence**: If a guideline is ambiguous, state "Per coding guidelines..." vs "Clinical best practice suggests...".
+- **Formatting**: Use bullet points for multiple codes.
+- **Disclaimer**: Always remind the user that you are an assistive tool and the final code selection is their responsibility.
+`;
+
+      // ==========================================
+      // AUDIO UTILS
+      // ==========================================
+      function base64ToUint8Array(base64) {
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes;
+      }
+
+      function arrayBufferToBase64(buffer) {
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+      }
+
+      function createPcmBlob(data) {
+        const l = data.length;
+        const int16 = new Int16Array(l);
+        for (let i = 0; i < l; i++) {
+          int16[i] = Math.max(-1, Math.min(1, data[i])) * 32768;
+        }
+        return {
+          data: arrayBufferToBase64(int16.buffer),
+          mimeType: 'audio/pcm;rate=16000',
+        };
+      }
+
+      async function decodeAudioData(data, ctx, sampleRate = 24000, numChannels = 1) {
+        const dataInt16 = new Int16Array(data.buffer);
+        const frameCount = dataInt16.length / numChannels;
+        const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+
+        for (let channel = 0; channel < numChannels; channel++) {
+          const channelData = buffer.getChannelData(channel);
+          for (let i = 0; i < frameCount; i++) {
+            channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+          }
+        }
+        return buffer;
+      }
+
+      // ==========================================
+      // LIVE CLIENT SERVICE
+      // ==========================================
+      class LiveClient {
+        constructor(apiKey, callbacks) {
+          this.ai = new GoogleGenAI({ apiKey });
+          this.callbacks = callbacks;
+          this.sessionPromise = null;
+          this.inputAudioContext = null;
+          this.outputAudioContext = null;
+          this.mediaStream = null;
+          this.processor = null;
+          this.source = null;
+          this.nextStartTime = 0;
+          this.sources = new Set();
+          this.analyser = null;
+        }
+
+        async connect(voiceMode) {
+          this.callbacks.onStateChange('connecting');
+
+          try {
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+               throw new Error("Microphone access requires a secure context (HTTPS) or localhost.");
+            }
+
+            try {
+              this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            } catch (e) {
+              if (e.name === 'NotAllowedError') throw new Error("Microphone permission denied.");
+              throw new Error("Microphone not found.");
+            }
+
+            this.inputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            
+            this.analyser = this.outputAudioContext.createAnalyser();
+            this.analyser.fftSize = 256;
+            this.analyser.connect(this.outputAudioContext.destination);
+
+            // Dynamically Select Language Instructions
+            const languageInstruction = voiceMode === 'hindi_mixed' 
+              ? `
+- **Language**: You are bilingual. Speak in a mix of Hindi and English.
+- **Context**: Use English for all Medical Terminology (ICD codes, Anatomy, Procedure names). Use Hindi for conversational fillers or explaining simple concepts to staff who might prefer it.
+- **Example**: "Sairam! Is patient ka diagnosis code J18.9 unspecified pneumonia hai, humein aur specificity chahiye."`
+              : "- **Language**: Speak in professional US English.";
+
+            const systemInstruction = CALADRIUS_SYSTEM_INSTRUCTION_BASE + "\n" + languageInstruction;
+
+            this.sessionPromise = this.ai.live.connect({
+              model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+              callbacks: {
+                onopen: this.handleOpen.bind(this),
+                onmessage: this.handleMessage.bind(this),
+                onclose: this.handleClose.bind(this),
+                onerror: this.handleError.bind(this),
+              },
+              config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                  voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+                },
+                systemInstruction: systemInstruction,
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
+              },
+            });
+            
+          } catch (error) {
+            console.error("Connection failed", error);
+            let msg = error.message || "Failed to connect";
+            if (msg.includes("503") || msg.toLowerCase().includes("unavailable")) {
+                msg = "Service unavailable (503). The server is temporarily overloaded. Please try again in a few moments.";
+            } else if (msg.toLowerCase().includes("network") || msg.toLowerCase().includes("fetch")) {
+                msg = "Network error. Please check your internet connection.";
+            }
+            this.callbacks.onError(msg);
+            this.callbacks.onStateChange('error');
+            this.disconnect();
+          }
+        }
+
+        handleOpen() {
+          this.callbacks.onStateChange('connected');
+          this.startAudioInput();
+        }
+
+        startAudioInput() {
+          if (!this.inputAudioContext || !this.mediaStream) return;
+          this.source = this.inputAudioContext.createMediaStreamSource(this.mediaStream);
+          this.processor = this.inputAudioContext.createScriptProcessor(4096, 1, 1);
+
+          this.processor.onaudioprocess = (e) => {
+            if (!this.sessionPromise) return;
+
+            const inputData = e.inputBuffer.getChannelData(0);
+            const pcmBlob = createPcmBlob(inputData);
+            
+            this.sessionPromise.then((session) => {
+              if (session) {
+                session.sendRealtimeInput({ media: pcmBlob });
+              }
+            }).catch((err) => {
+               // Silently ignore
+            });
+          };
+
+          this.source.connect(this.processor);
+          this.processor.connect(this.inputAudioContext.destination);
+        }
+
+        async handleMessage(message) {
+          if (message.serverContent?.inputTranscription?.text) {
+              this.callbacks.onTranscript(message.serverContent.inputTranscription.text, true);
+          }
+          if (message.serverContent?.outputTranscription?.text) {
+              this.callbacks.onTranscript(message.serverContent.outputTranscription.text, false);
+          }
+
+          const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+          if (base64Audio && this.outputAudioContext) {
+            try {
+              const audioData = base64ToUint8Array(base64Audio);
+              this.nextStartTime = Math.max(this.nextStartTime, this.outputAudioContext.currentTime);
+              const audioBuffer = await decodeAudioData(audioData, this.outputAudioContext, 24000, 1);
+
+              const source = this.outputAudioContext.createBufferSource();
+              source.buffer = audioBuffer;
+              
+              if (this.analyser) source.connect(this.analyser);
+              else source.connect(this.outputAudioContext.destination);
+
+              source.addEventListener('ended', () => {
+                this.sources.delete(source);
+              });
+
+              source.start(this.nextStartTime);
+              this.nextStartTime += audioBuffer.duration;
+              this.sources.add(source);
+
+              if (this.analyser) this.visualize();
+
+            } catch (e) {
+              console.error("Error decoding audio", e);
+            }
+          }
+
+          if (message.serverContent?.interrupted) {
+            this.sources.forEach(s => s.stop());
+            this.sources.clear();
+            this.nextStartTime = 0;
+          }
+        }
+
+        visualize() {
+           if (!this.analyser) return;
+           const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+           this.analyser.getByteFrequencyData(dataArray);
+           this.callbacks.onAudioData(dataArray);
+           requestAnimationFrame(() => {});
+        }
+
+        handleClose(e) {
+          console.log("Session closed", e);
+          this.disconnect();
+        }
+
+        handleError(e) {
+          console.error("Session error", e);
+          let errorMsg = e.message || "Connection lost.";
+          
+          if (typeof errorMsg === 'string') {
+             if (errorMsg.includes("503") || errorMsg.toLowerCase().includes("unavailable")) {
+                errorMsg = "Service unavailable (503). The server is overloaded.";
+             }
+          }
+          
+          this.callbacks.onError(errorMsg);
+          this.disconnect();
+        }
+
+        disconnect() {
+          this.callbacks.onStateChange('disconnected');
+          this.mediaStream?.getTracks().forEach(t => t.stop());
+          this.source?.disconnect();
+          this.processor?.disconnect();
+          this.analyser?.disconnect();
+          this.inputAudioContext?.close();
+          this.outputAudioContext?.close();
+          this.sources.forEach(s => s.stop());
+          this.sources.clear();
+          this.sessionPromise = null;
+        }
+      }
+
+      // ==========================================
+      // UI COMPONENTS
+      // ==========================================
+      
+      const Visualizer = ({ active, audioData }) => {
+        const canvasRef = useRef(null);
+        useEffect(() => {
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          const ctx = canvas.getContext('2d');
+          let animationId;
+
+          const draw = () => {
+            const width = canvas.width;
+            const height = canvas.height;
+            ctx.clearRect(0, 0, width, height);
+
+            const gradient = ctx.createLinearGradient(0, 0, width, 0);
+            gradient.addColorStop(0, '#06b6d4'); // Cyan
+            gradient.addColorStop(0.5, '#3b82f6'); // Blue
+            gradient.addColorStop(1, '#06b6d4');
+            
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = gradient;
+            ctx.beginPath();
+
+            const bufferLength = audioData ? audioData.length : 64;
+            const sliceWidth = width * 1.0 / bufferLength;
+            let x = 0;
+
+            if (active && audioData) {
+              for (let i = 0; i < bufferLength; i++) {
+                const v = audioData[i] / 128.0;
+                const y = (v * height) / 2;
+                i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+                x += sliceWidth;
+              }
+            } else {
+              ctx.moveTo(0, height / 2);
+              ctx.lineTo(width, height / 2);
+            }
+            ctx.lineTo(width, height / 2);
+            ctx.stroke();
+            animationId = requestAnimationFrame(draw);
+          };
+          draw();
+          return () => cancelAnimationFrame(animationId);
+        }, [active, audioData]);
+
+        return (
+          <canvas ref={canvasRef} width={400} height={100} className="w-full h-24 bg-slate-900/50 rounded-lg border border-slate-700 shadow-inner" />
+        );
+      };
+
+      const IntegrationBadge = ({ name, description, icon: Icon, isActive, colorClass }) => {
+        const activeClass = isActive 
+          ? `bg-slate-800 border-${colorClass}-500 shadow-[0_0_15px_rgba(0,0,0,0.3)]` 
+          : 'bg-slate-900 border-slate-700 opacity-70';
+        
+        return (
+          <div className={`relative overflow-hidden p-4 rounded-xl border transition-all duration-300 ${activeClass}`}>
+            <div className="flex items-start justify-between">
+              <div className="flex items-center space-x-3">
+                <div className={`p-2 rounded-lg ${isActive ? `bg-${colorClass}-500/20 text-${colorClass}-400` : 'bg-slate-800 text-slate-500'}`}>
+                  <Icon size={24} />
+                </div>
+                <div>
+                  <h3 className={`font-semibold ${isActive ? 'text-white' : 'text-slate-400'}`}>{name}</h3>
+                  <p className="text-xs text-slate-400 mt-1 max-w-[150px]">{description}</p>
+                </div>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${isActive ? `bg-${colorClass}-500/20 text-${colorClass}-300 border border-${colorClass}-500/30` : 'bg-slate-800 text-slate-500 border border-slate-700'}`}>
+                  {isActive ? 'Active' : 'Standby'}
+                </span>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey }) => {
+        if (!isOpen) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 fade-in">
+            <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-md shadow-2xl relative">
+              <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-white">
+                <X size={20} />
+              </button>
+              <div className="flex items-center gap-3 mb-4">
+                 <div className="bg-cyan-600/20 p-2 rounded-lg text-cyan-500"><Key size={24} /></div>
+                 <h2 className="text-xl font-bold text-white">Setup API Key</h2>
+              </div>
+              <p className="text-slate-400 text-sm mb-6">
+                 To activate the <strong>Caladrius RCM</strong> voice assistant, please enter your Google Gemini API Key. 
+                 This key is stored only in your browser.
+              </p>
+              <div className="space-y-4">
+                <div>
+                   <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Google GenAI Key</label>
+                   <input 
+                     type="password" 
+                     value={apiKey}
+                     onChange={(e) => setApiKey(e.target.value)}
+                     placeholder="AIzaSy..."
+                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white focus:ring-2 focus:ring-cyan-500 outline-none font-mono text-sm placeholder:text-slate-700 transition-all"
+                   />
+                   <div className="flex justify-between mt-2">
+                     <p className="text-xs text-slate-500">
+                       Don't have a key? <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-cyan-400 hover:underline">Get one here</a>
+                     </p>
+                   </div>
+                </div>
+                <button 
+                  onClick={onClose}
+                  className="w-full bg-gradient-to-r from-cyan-600 to-cyan-500 hover:from-cyan-500 hover:to-cyan-400 text-white font-bold py-3 rounded-xl transition-all shadow-lg shadow-cyan-900/20"
+                >
+                  Save & Connect
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      // ==========================================
+      // MAIN APP
+      // ==========================================
+      const App = () => {
+        const [connectionState, setConnectionState] = useState('disconnected');
+        const [messages, setMessages] = useState([]);
+        const [voiceMode, setVoiceMode] = useState('english');
+        const [audioData, setAudioData] = useState(new Uint8Array(0));
+        const [error, setError] = useState(null);
+        
+        // Settings / API Key State
+        const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
+        const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+        
+        const clientRef = useRef(null);
+        const scrollRef = useRef(null);
+
+        useEffect(() => {
+          localStorage.setItem('gemini_api_key', apiKey);
+        }, [apiKey]);
+
+        useEffect(() => {
+          if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }, [messages]);
+
+        const handleToggleConnection = async () => {
+          if (connectionState === 'connected' || connectionState === 'connecting') {
+            clientRef.current?.disconnect();
+            return;
+          }
+
+          if (!apiKey) {
+            setIsSettingsOpen(true);
+            return;
+          }
+
+          setError(null);
+          clientRef.current = new LiveClient(apiKey, {
+            onStateChange: setConnectionState,
+            onAudioData: (data) => setAudioData(new Uint8Array(data)),
+            onTranscript: (text, isUser) => {
+              setMessages(prev => {
+                 const newRole = isUser ? 'user' : 'assistant';
+                 const lastMsg = prev[prev.length - 1];
+                 if (lastMsg && lastMsg.role === newRole) {
+                   const updatedMessages = [...prev];
+                   updatedMessages[updatedMessages.length - 1] = {
+                     ...lastMsg,
+                     text: lastMsg.text + text
+                   };
+                   return updatedMessages;
+                 }
+                 return [...prev, {
+                   id: Date.now().toString(),
+                   role: newRole,
+                   text: text,
+                   timestamp: new Date()
+                 }];
+              });
+            },
+            onError: (err) => setError(err),
+          });
+
+          await clientRef.current.connect(voiceMode);
+        };
+
+        const handleVoiceModeToggle = () => {
+          if (connectionState === 'disconnected') {
+            setVoiceMode(prev => prev === 'english' ? 'hindi_mixed' : 'english');
+          }
+        };
+
+        const isConnected = connectionState === 'connected';
+        
+        const getSystemStatus = () => {
+          if (error) return { text: 'System Error', color: 'text-red-400', bg: 'bg-red-500' };
+          if (isConnected) return { text: 'RCM Agent Active', color: 'text-cyan-400', bg: 'bg-cyan-500' };
+          if (connectionState === 'connecting') return { text: 'Connecting', color: 'text-yellow-400', bg: 'bg-yellow-500' };
+          return { text: 'Standby', color: 'text-slate-400', bg: 'bg-slate-500' };
+        };
+        const status = getSystemStatus();
+
+        return (
+          <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col items-center p-6 relative overflow-hidden font-sans">
+             {/* Background Decor */}
+            <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none z-0">
+              <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-cyan-900/10 rounded-full blur-[100px]" />
+              <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-900/10 rounded-full blur-[100px]" />
+            </div>
+            
+            <SettingsModal 
+               isOpen={isSettingsOpen} 
+               onClose={() => setIsSettingsOpen(false)} 
+               apiKey={apiKey} 
+               setApiKey={setApiKey} 
+            />
+
+            <div className="z-10 w-full max-w-6xl flex flex-col gap-6">
+              {/* Header */}
+              <header className="flex items-center justify-between border-b border-slate-800 pb-6">
+                <div className="flex items-center gap-3">
+                  <div className="bg-cyan-600 p-2.5 rounded-lg shadow-lg shadow-cyan-900/30">
+                     <Activity className="text-white" size={28} />
+                  </div>
+                  <div>
+                    <h1 className="text-2xl font-bold text-white tracking-tight">Caladrius <span className="text-cyan-400">Copilot</span></h1>
+                    <p className="text-slate-400 text-sm">Revenue Cycle Management (RCM) Voice Assistant</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                   <div className="flex flex-col items-end">
+                      <span className="text-xs text-slate-500 uppercase font-bold tracking-wider">Status</span>
+                      <span className={`flex items-center gap-2 text-sm font-medium ${status.color}`}>
+                        <span className="relative flex h-2 w-2">
+                          {isConnected && <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${status.bg} opacity-75`}></span>}
+                          <span className={`relative inline-flex rounded-full h-2 w-2 ${status.bg}`}></span>
+                        </span>
+                        {status.text}
+                      </span>
+                   </div>
+                   <button 
+                     onClick={() => setIsSettingsOpen(true)}
+                     className="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors border border-slate-700"
+                     title="API Key Settings"
+                   >
+                     <Settings size={20} />
+                   </button>
+                </div>
+              </header>
+
+              {/* Badges */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <IntegrationBadge name="Coding Guidelines" description="ICD-10-CM & CPT Standard Reference." icon={FileText} isActive={isConnected} colorClass="cyan" />
+                <IntegrationBadge name="Payer Rules" description="LCD/NCD & Denial Management Logic." icon={ShieldCheck} isActive={isConnected} colorClass="blue" />
+                <IntegrationBadge name="Global Support" description="Multi-lingual Medical Terminology." icon={Globe2} isActive={isConnected && voiceMode === 'hindi_mixed'} colorClass="emerald" />
+              </div>
+
+              {/* Workspace */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[600px]">
+                {/* Left Controls */}
+                <div className="lg:col-span-1 flex flex-col gap-4">
+                  <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 flex flex-col items-center justify-center flex-1 shadow-xl backdrop-blur-sm relative overflow-hidden">
+                    <div className="w-full mb-6 z-10">
+                      <Visualizer active={isConnected} audioData={audioData} />
+                    </div>
+                    <div className="flex flex-col items-center gap-4 w-full z-10">
+                       <button 
+                        onClick={handleToggleConnection}
+                        disabled={connectionState === 'connecting'}
+                        className={`w-20 h-20 rounded-full flex items-center justify-center shadow-lg transition-all duration-300 ${isConnected ? 'bg-red-500 hover:bg-red-600 shadow-red-900/50' : error ? 'bg-cyan-600 ring-2 ring-red-500' : 'bg-cyan-600 hover:bg-cyan-500 shadow-cyan-900/50 animate-pulse-slow'}`}
+                      >
+                        {connectionState === 'connecting' ? <Activity className="animate-spin text-white" /> : isConnected ? <MicOff className="text-white" size={32} /> : <Mic className="text-white" size={32} />}
+                      </button>
+                      <div className="text-center">
+                        <h3 className="text-lg font-medium text-white">{isConnected ? 'Consulting ' + AGENT_NAME : 'Start Session'}</h3>
+                        <p className="text-sm text-slate-400">{isConnected ? 'Analyzing audio...' : 'Connect to process claims & documentation'}</p>
+                      </div>
+                      {error && (
+                        <div className="mt-2 p-3 bg-red-500/10 border border-red-500/50 rounded-lg text-red-200 text-xs text-center flex items-center gap-2 max-w-[250px]">
+                          <AlertCircle size={16} className="shrink-0 text-red-400" />
+                          <span>{error}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Config */}
+                  <div className="bg-slate-900/50 border border-slate-800 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
+                     <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                       <Cpu size={16} /> Language Mode
+                     </h3>
+                     <div className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
+                        <div className="flex items-center gap-3">
+                          <Globe2 className={`text-${voiceMode === 'hindi_mixed' ? 'emerald' : 'slate'}-400`} size={20} />
+                          <div>
+                            <div className="text-sm font-medium text-slate-200">Standard English</div>
+                            <div className="text-xs text-slate-500">{voiceMode === 'hindi_mixed' ? '+ Hindi Support' : 'US Medical'}</div>
+                          </div>
+                        </div>
+                        <button 
+                          onClick={handleVoiceModeToggle}
+                          disabled={isConnected}
+                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${voiceMode === 'hindi_mixed' ? 'bg-emerald-600' : 'bg-slate-600'} ${isConnected ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                        >
+                          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${voiceMode === 'hindi_mixed' ? 'translate-x-6' : 'translate-x-1'}`} />
+                        </button>
+                     </div>
+                  </div>
+                </div>
+
+                {/* Right Transcript */}
+                <div className="lg:col-span-2 bg-slate-900/80 border border-slate-800 rounded-2xl flex flex-col shadow-xl overflow-hidden backdrop-blur-md">
+                  <div className="p-4 border-b border-slate-800 bg-slate-900/90 flex justify-between items-center">
+                    <h3 className="font-semibold text-slate-200 flex items-center gap-2">
+                      <MessageSquare size={18} className="text-cyan-400" />
+                      Live Transcript
+                    </h3>
+                    <span className="text-xs text-slate-500 font-mono">Gemini Live</span>
+                  </div>
+                  <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {messages.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-500 gap-3">
+                        <Stethoscope size={48} className="opacity-20" />
+                        <p className="text-center max-w-sm">Welcome to the Caladrius RCM Copilot. <br/> Discuss coding guidelines, denials, or clinical documentation.</p>
+                      </div>
+                    ) : (
+                      messages.map((msg) => (
+                        <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          <div className={`max-w-[80%] rounded-2xl p-4 ${msg.role === 'user' ? 'bg-cyan-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-none'}`}>
+                            <div className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</div>
+                            <div className={`text-[10px] mt-2 opacity-50 ${msg.role === 'user' ? 'text-cyan-200' : 'text-slate-400'}`}>
+                              {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <div className="p-3 bg-slate-950 border-t border-slate-800 text-xs text-slate-400 font-mono flex items-center justify-between">
+                     <div className="flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse"></span> RCM_DATABASE_ACTIVE</div>
+                     <div>SESSION_ID: {Math.random().toString(36).substring(7).toUpperCase()}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const root = createRoot(document.getElementById('root'));
+      root.render(<App />);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Caladrius Voice Agent",
+  "description": "A demonstration of interconnected voice integrations featuring LiveKit real-time transport, Sarvam Indian-language AI, and CopilotKit context awareness, powered by Gemini Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
